@@ -19,7 +19,7 @@ fn part1(input: &str) {
             let (tx_input, rx_input) = mpsc::channel();
             let (tx_output, rx_output) = mpsc::channel();
 
-            let mut cpu = IntcodeComputer::new(
+            let handle = IntcodeComputer::new(
                 input.to_owned(),
                 Arc::new(Mutex::new(rx_input)),
                 Arc::new(Mutex::new(tx_output)),
@@ -27,7 +27,7 @@ fn part1(input: &str) {
             vec![phase, output]
                 .into_iter()
                 .for_each(|v| tx_input.send(v).unwrap());
-            cpu.run();
+            handle.join().unwrap();
             output = rx_output.recv().unwrap();
         });
 
@@ -59,10 +59,7 @@ fn part2(input: &str) {
                 let (tx, rx) = (txs[i].clone(), rxs[(size + i - 1) % size].clone());
                 txs[i].lock().unwrap().send(phase as i64).unwrap();
 
-                thread::spawn(move || {
-                    let mut cpu = IntcodeComputer::new(input.clone(), rx, tx);
-                    cpu.run();
-                })
+                IntcodeComputer::new(input.clone(), rx, tx)
             })
             .collect::<Vec<_>>();
 

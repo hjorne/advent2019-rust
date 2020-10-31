@@ -1,11 +1,14 @@
 use phf::phf_map;
-use std::sync::{Mutex, Arc};
-use std::sync::mpsc::{Sender, Receiver};
+use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::thread::JoinHandle;
 
 #[derive(Debug)]
 pub struct IntcodeComputer {
     memory: Vec<i64>,
     instr_ptr: usize,
+    rel_base: usize,
     input: Arc<Mutex<Receiver<i64>>>,
     output: Arc<Mutex<Sender<i64>>>,
 }
@@ -23,21 +26,29 @@ pub enum ParamMode {
 }
 
 impl IntcodeComputer {
-    pub fn new(s: String, input: Arc<Mutex<Receiver<i64>>>, output: Arc<Mutex<Sender<i64>>>) -> IntcodeComputer {
-        let memory = s
-            .trim()
-            .split(",")
-            .map(|substr| substr.parse::<i64>().expect("Bad digit"))
-            .collect();
-        IntcodeComputer {
-            memory,
-            instr_ptr: 0,
-            input,
-            output
-        }
+    pub fn new(
+        s: String,
+        input: Arc<Mutex<Receiver<i64>>>,
+        output: Arc<Mutex<Sender<i64>>>,
+    ) -> JoinHandle<()> {
+        thread::spawn(move || {
+            let memory = s
+                .trim()
+                .split(",")
+                .map(|substr| substr.parse::<i64>().expect("Bad digit"))
+                .collect();
+            let mut cpu = IntcodeComputer {
+                memory,
+                instr_ptr: 0,
+                rel_base: 0,
+                input,
+                output,
+            };
+            cpu.run();
+        })
     }
 
-    pub fn run(&mut self) {
+    fn run(&mut self) {
         loop {
             let opcode = self.parse_opcode();
             match opcode.code {
@@ -55,11 +66,11 @@ impl IntcodeComputer {
         }
     }
 
-    pub fn write(&mut self, location: usize, value: i64) {
+    fn write(&mut self, location: usize, value: i64) {
         self.memory[location] = value;
     }
 
-    pub fn read(&self, location: usize, mode: Option<ParamMode>) -> i64 {
+    fn read(&self, location: usize, mode: Option<ParamMode>) -> i64 {
         match mode {
             Some(mode) => match mode {
                 ParamMode::Position => self.memory[self.memory[location] as usize],
