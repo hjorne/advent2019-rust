@@ -1,3 +1,6 @@
+mod intcode;
+mod day7;
+
 fn main() {
-    println!("Hello, world!");
+    day7::day7();
 }
