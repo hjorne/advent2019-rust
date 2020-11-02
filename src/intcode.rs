@@ -1,18 +1,24 @@
-use num_bigint::{BigInt, Sign};
 use phf::phf_map;
 use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
 
 #[derive(Debug)]
 pub struct IntcodeComputer {
-    memory: HashMap<usize, BigInt>,
+    memory: HashMap<usize, i64>,
     instr_ptr: usize,
-    rel_base: BigInt,
-    input: Arc<Mutex<Receiver<BigInt>>>,
-    output: Arc<Mutex<Sender<BigInt>>>,
+    rel_base: i64,
+    input: Arc<Mutex<Receiver<i64>>>,
+    output: Arc<Mutex<Sender<i64>>>,
+}
+
+#[derive(Debug)]
+pub struct IntcodeHandle {
+    pub thread_handle: JoinHandle<()>,
+    pub tx_input: Sender<i64>,
+    pub rx_output: Receiver<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -35,33 +41,55 @@ pub enum RWMode {
 }
 
 impl IntcodeComputer {
-    pub fn new(
+    pub fn new(s: &str, overrides: Vec<(usize, i64)>) -> IntcodeHandle {
+        let (tx_input, rx_input) = mpsc::channel();
+        let (tx_output, rx_output) = mpsc::channel();
+
+        let thread_handle = IntcodeComputer::from(
+            s.to_owned(),
+            overrides,
+            Arc::new(Mutex::new(rx_input)),
+            Arc::new(Mutex::new(tx_output)),
+        );
+
+        IntcodeHandle {
+            thread_handle,
+            tx_input,
+            rx_output,
+        }
+    }
+
+    pub fn from(
         s: String,
-        input: Arc<Mutex<Receiver<BigInt>>>,
-        output: Arc<Mutex<Sender<BigInt>>>,
+        overrides: Vec<(usize, i64)>,
+        input: Arc<Mutex<Receiver<i64>>>,
+        output: Arc<Mutex<Sender<i64>>>,
     ) -> JoinHandle<()> {
         thread::spawn(move || {
             let memory: HashMap<_, _> = s
                 .trim()
                 .split(",")
-                .map(|substr| BigInt::from(substr.parse::<i64>().expect("Bad digit")))
+                .map(|substr| substr.parse::<i64>().expect("Bad digit"))
                 .enumerate()
                 .collect();
             let mut cpu = IntcodeComputer {
                 memory,
                 instr_ptr: 0,
-                rel_base: BigInt::from(0),
+                rel_base: 0,
                 input,
                 output,
             };
+
+            overrides.into_iter().for_each(|(i, val)| cpu.write(i, val));
+
             cpu.run();
         })
     }
 
     fn run(&mut self) {
+        println!("CPU running");
         loop {
             let opcode = self.parse_opcode();
-            //dbg!(&opcode);
             match opcode.code {
                 1 => self.opcode1(opcode.modes),
                 2 => self.opcode2(opcode.modes),
@@ -76,19 +104,20 @@ impl IntcodeComputer {
                 x => panic!("Unknown opcode: {}!", x),
             }
         }
+        println!("CPU complete");
     }
 
-    fn write(&mut self, location: usize, value: BigInt) {
+    pub fn write(&mut self, location: usize, value: i64) {
         self.memory.insert(location, value);
     }
 
-    fn read(&self, location: usize, param_mode: ParamMode, rw_mode: RWMode) -> BigInt {
+    fn read(&self, location: usize, param_mode: ParamMode, rw_mode: RWMode) -> i64 {
         match rw_mode {
             RWMode::Read => match param_mode {
-                ParamMode::Position => self.read_addr(bigint_to_usize(self.read_addr(location))),
+                ParamMode::Position => self.read_addr(self.read_addr(location) as usize),
                 ParamMode::Immediate => self.read_addr(location),
                 ParamMode::Relative => {
-                    self.read_addr(bigint_to_usize(&self.rel_base + self.read_addr(location)))
+                    self.read_addr((self.rel_base + self.read_addr(location)) as usize)
                 }
             },
             RWMode::Write => match param_mode {
@@ -99,22 +128,19 @@ impl IntcodeComputer {
         }
     }
 
-    fn read_addr(&self, location: usize) -> BigInt {
-        self.memory
-            .get(&location)
-            .unwrap_or(&BigInt::from(0))
-            .clone()
+    fn read_addr(&self, location: usize) -> i64 {
+        self.memory.get(&location).unwrap_or(&0).clone()
     }
 
     fn parse_opcode(&self) -> OpCode {
-        let value = bigint_to_usize(self.read_addr(self.instr_ptr));
+        let value = self.read_addr(self.instr_ptr) as usize;
         OpCode::new(value)
     }
 
     fn opcode1(&mut self, modes: Vec<ParamMode>) {
         let val1 = self.read(self.instr_ptr + 1, modes[0], RWMode::Read);
         let val2 = self.read(self.instr_ptr + 2, modes[1], RWMode::Read);
-        let pos = bigint_to_usize(self.read(self.instr_ptr + 3, modes[2], RWMode::Write));
+        let pos = self.read(self.instr_ptr + 3, modes[2], RWMode::Write) as usize;
 
         self.write(pos, val1 + val2);
         self.instr_ptr += *OPCODE_SIZE.get(&1).unwrap() + 1;
@@ -123,14 +149,14 @@ impl IntcodeComputer {
     fn opcode2(&mut self, modes: Vec<ParamMode>) {
         let val1 = self.read(self.instr_ptr + 1, modes[0], RWMode::Read);
         let val2 = self.read(self.instr_ptr + 2, modes[1], RWMode::Read);
-        let pos = bigint_to_usize(self.read(self.instr_ptr + 3, modes[2], RWMode::Write));
+        let pos = self.read(self.instr_ptr + 3, modes[2], RWMode::Write) as usize;
 
         self.write(pos, val1 * val2);
         self.instr_ptr += *OPCODE_SIZE.get(&2).unwrap() + 1;
     }
 
     fn opcode3(&mut self, modes: Vec<ParamMode>) {
-        let pos = bigint_to_usize(self.read(self.instr_ptr + 1, modes[0], RWMode::Write));
+        let pos = self.read(self.instr_ptr + 1, modes[0], RWMode::Write) as usize;
         let input_value = self.input.lock().unwrap().recv().unwrap();
         self.write(pos, input_value);
         self.instr_ptr += *OPCODE_SIZE.get(&3).unwrap() + 1;
@@ -143,8 +169,8 @@ impl IntcodeComputer {
     }
 
     fn opcode5(&mut self, modes: Vec<ParamMode>) {
-        let val1 = bigint_to_usize(self.read(self.instr_ptr + 1, modes[0], RWMode::Read));
-        let val2 = bigint_to_usize(self.read(self.instr_ptr + 2, modes[1], RWMode::Read));
+        let val1 = self.read(self.instr_ptr + 1, modes[0], RWMode::Read) as usize;
+        let val2 = self.read(self.instr_ptr + 2, modes[1], RWMode::Read) as usize;
 
         if val1 != 0 {
             self.instr_ptr = val2;
@@ -154,8 +180,8 @@ impl IntcodeComputer {
     }
 
     fn opcode6(&mut self, modes: Vec<ParamMode>) {
-        let val1 = bigint_to_usize(self.read(self.instr_ptr + 1, modes[0], RWMode::Read));
-        let val2 = bigint_to_usize(self.read(self.instr_ptr + 2, modes[1], RWMode::Read));
+        let val1 = self.read(self.instr_ptr + 1, modes[0], RWMode::Read) as usize;
+        let val2 = self.read(self.instr_ptr + 2, modes[1], RWMode::Read) as usize;
 
         if val1 == 0 {
             self.instr_ptr = val2;
@@ -167,12 +193,12 @@ impl IntcodeComputer {
     fn opcode7(&mut self, modes: Vec<ParamMode>) {
         let val1 = self.read(self.instr_ptr + 1, modes[0], RWMode::Read);
         let val2 = self.read(self.instr_ptr + 2, modes[1], RWMode::Read);
-        let pos = bigint_to_usize(self.read(self.instr_ptr + 3, modes[2], RWMode::Write));
+        let pos = self.read(self.instr_ptr + 3, modes[2], RWMode::Write) as usize;
 
         if val1 < val2 {
-            self.write(pos, BigInt::from(1));
+            self.write(pos, 1);
         } else {
-            self.write(pos, BigInt::from(0));
+            self.write(pos, 0);
         }
         self.instr_ptr += *OPCODE_SIZE.get(&7).unwrap() + 1;
     }
@@ -180,12 +206,12 @@ impl IntcodeComputer {
     fn opcode8(&mut self, modes: Vec<ParamMode>) {
         let val1 = self.read(self.instr_ptr + 1, modes[0], RWMode::Read);
         let val2 = self.read(self.instr_ptr + 2, modes[1], RWMode::Read);
-        let pos = bigint_to_usize(self.read(self.instr_ptr + 3, modes[2], RWMode::Write));
+        let pos = self.read(self.instr_ptr + 3, modes[2], RWMode::Write) as usize;
 
         if val1 == val2 {
-            self.write(pos, BigInt::from(1));
+            self.write(pos, 1);
         } else {
-            self.write(pos, BigInt::from(0));
+            self.write(pos, 0);
         }
         self.instr_ptr += *OPCODE_SIZE.get(&8).unwrap() + 1;
     }
@@ -194,19 +220,6 @@ impl IntcodeComputer {
         let val1 = self.read(self.instr_ptr + 1, modes[0], RWMode::Read);
         self.rel_base += val1;
         self.instr_ptr += *OPCODE_SIZE.get(&9).unwrap() + 1;
-    }
-}
-
-fn bigint_to_usize(bigint: BigInt) -> usize {
-    let (sign, digits) = bigint.to_u32_digits();
-    if sign == Sign::Minus {
-        panic!("Negative sign converting BigInt {}", bigint);
-    } else if digits.len() > 1 {
-        panic!("Too many digits on BigInt {}", bigint);
-    } else if digits.len() == 0 {
-        0
-    } else {
-        digits[0] as usize
     }
 }
 

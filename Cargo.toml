@@ -10,3 +10,6 @@ edition = "2018"
 phf = { version = "0.7.24", features = ["macros"] }
 permute = "0.1.0"
 num-bigint = "0.3.0"
+derive_more = "0.99.11"
+num-traits = "0.2"
+num-derive = "0.3"
